@@ -1,0 +1,412 @@
+<!DOCTYPE html>  
+  
+<html>  
+  <head>  
+    <title>Hilbert Space Filling Curve in 3D</title>  
+    <meta charset="utf-8">  
+  
+    <!--script src="http://ajax.googleapis.com/ajax/libs/jquery/1/jquery.min.js"/-->  
+
+    <script type="text/javascript" src="gl-matrix-min.js"></script>
+    <script type="text/javascript" src="zpk.js"></script>
+ 
+    <script id="shader-fs" type="x-shader/x-fragment">
+        precision mediump float;
+    
+        void main(void) {
+          float z = gl_FragCoord.z / gl_FragCoord.w;
+          float alpha = 1.0-(z-1.25)*0.7;//*2.0;
+          vec4 frag_color = vec4(1.0, 1.0, 1.0, alpha);
+          gl_FragColor = frag_color;
+        }
+    </script>
+    
+    <script id="shader-vs" type="x-shader/x-vertex">
+        attribute vec3 aVertexPosition;
+    
+        uniform mat4 uMVMatrix;
+        uniform mat4 uPMatrix;
+    
+        void main(void) {
+          gl_Position = uPMatrix * uMVMatrix * vec4(aVertexPosition, 1.0);
+        }
+    </script>  
+
+    <script type="text/javascript">
+      var gl = null;
+      var shaderProgram;
+      var mvMatrix = mat4.create();
+      var pMatrix = mat4.create();
+      var rotMatrix = mat4.create();
+      var rotX = 0;
+      var rotY = 0;
+      var rotZ = 0;
+      var zoom = 1.0;
+      var spin = false;
+      var verts2show = 0;
+      var blend = false;
+      var lastms = 0;
+      var fpsArray = null;
+
+      var canvas = null;
+      var sfcVertexBuffer = null;
+      var iteration = 4;
+      var maxIterations = 8;
+
+      function getShader(gl, id)
+      {
+        var shaderScript = document.getElementById(id);
+        if (!shaderScript) {
+          return null;
+        }
+
+        var str = "";
+        var k = shaderScript.firstChild;
+        while (k) {
+          if (k.nodeType == 3) {
+              str += k.textContent;
+          }
+          k = k.nextSibling;
+        }
+
+        var shader;
+        if (shaderScript.type == "x-shader/x-fragment") {
+            shader = gl.createShader(gl.FRAGMENT_SHADER);
+        } else if (shaderScript.type == "x-shader/x-vertex") {
+            shader = gl.createShader(gl.VERTEX_SHADER);
+        } else {
+            return null;
+        }
+
+        gl.shaderSource(shader, str);
+        gl.compileShader(shader);
+
+        if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+          alert(gl.getShaderInfoLog(shader));
+          //console.log(gl.getShaderInfoLog(shader));
+          return null;
+        }
+
+        return shader;
+      }
+
+      function initShaders() {
+        var fragmentShader = getShader(gl, "shader-fs");
+        var vertexShader = getShader(gl, "shader-vs");
+
+        shaderProgram = gl.createProgram();
+        gl.attachShader(shaderProgram, vertexShader);
+        gl.attachShader(shaderProgram, fragmentShader);
+        gl.linkProgram(shaderProgram);
+
+        if (!gl.getProgramParameter(shaderProgram, gl.LINK_STATUS)) {
+            alert("Could not initialise shaders");
+        }
+
+        gl.useProgram(shaderProgram);
+
+        shaderProgram.vertexPositionAttribute = gl.getAttribLocation(shaderProgram, "aVertexPosition");
+        gl.enableVertexAttribArray(shaderProgram.vertexPositionAttribute);
+
+        shaderProgram.pMatrixUniform = gl.getUniformLocation(shaderProgram, "uPMatrix");
+        shaderProgram.mvMatrixUniform = gl.getUniformLocation(shaderProgram, "uMVMatrix");
+      }
+
+      function setMatrixUniforms() {
+        gl.uniformMatrix4fv(shaderProgram.pMatrixUniform, false, pMatrix);
+        gl.uniformMatrix4fv(shaderProgram.mvMatrixUniform, false, mvMatrix);
+      }
+      function removeBuffers()
+      {
+        if (sfcVertexBuffer!=null)
+        {
+          gl.deleteBuffer(sfcVertexBuffer);
+          sfcVertexBuffer = null;
+        }
+      }
+      function initBuffers()
+      {
+        sfcVertexBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, sfcVertexBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, createSFCArray(iteration), gl.STATIC_DRAW);
+        sfcVertexBuffer.itemSize = 3; //line
+        sfcVertexBuffer.numItems = Math.pow(8, iteration);
+        verts2show = sfcVertexBuffer.numItems;
+      }
+      function drawScene()
+      {
+        if (null==sfcVertexBuffer) 
+          initBuffers();
+
+        gl.viewport(0, 0, gl.viewportWidth, gl.viewportHeight);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+        if (blend) 
+        {
+          gl.disable(gl.DEPTH_TEST);
+          gl.enable(gl.BLEND);
+          gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+        }
+        else
+        {
+          gl.disable(gl.BLEND);
+          gl.enable(gl.DEPTH_TEST);
+        }
+        //mat4.perspective(45, gl.viewportWidth / gl.viewportHeight, 0.1, 100.0, pMatrix);
+        mat4.perspective(45, gl.viewportWidth / gl.viewportHeight, 0.1, 100.0, pMatrix);
+        mat4.identity(mvMatrix);
+        mat4.rotateY(mvMatrix, rotX);
+        mat4.rotateX(mvMatrix, rotY);
+        mat4.rotateZ(mvMatrix, rotZ);        
+        mat4.multiply(mvMatrix, rotMatrix, rotMatrix);
+        if (!spin)
+          rotX = rotY = rotZ = 0;
+        mat4.identity(mvMatrix);
+        mat4.translate(mvMatrix, [0.0, 0.0, -2.0]);        
+        mat4.multiply(mvMatrix, rotMatrix);
+        mat4.scale(mvMatrix, [zoom, zoom, zoom]);
+
+        mat4.translate(mvMatrix, [-0.5, -0.5, -0.5]);
+        
+        gl.vertexAttribPointer(shaderProgram.vertexPositionAttribute,
+                               sfcVertexBuffer.itemSize, gl.FLOAT, false, 0, 0);
+        setMatrixUniforms();
+        if (verts2show<sfcVertexBuffer.numItems)
+          ++verts2show;
+        gl.drawArrays(gl.LINE_STRIP, 0, /*sfcVertexBuffer.numItems*/verts2show);
+        gl.flush();
+      }
+
+      function addFPSComponent(canvas)
+      {
+        var fpsDiv = document.createElement("div");
+        //fpsDiv.id="fpsText";
+        fpsDiv.style.color="#FFFFFF";
+        fpsDiv.style.backgroundColor="rgba(0,0,0,0.5)";
+        fpsDiv.style.position="absolute";
+        //fpsDiv.style.zIndex="1";
+        fpsDiv.style.top="0";
+        fpsDiv.style.left="5px";
+        fpsText = document.createTextNode("Text");
+        fpsDiv.appendChild(fpsText);
+        canvas.parentNode.appendChild(fpsDiv);
+      }
+      function getMeanFPS(newdiff)
+      {
+        var maxlen = 10;
+        if (fpsArray==null)
+         fpsArray = new Array(); 
+
+        fpsArray.push(newdiff);
+        while (fpsArray.length>maxlen)
+          fpsArray.shift();
+        var sum = 0;
+        for (var i=0;i<fpsArray.length;i++)  
+          sum = sum + fpsArray[i];
+        if (sum==0)
+          return "NaN";
+        return Math.round((1000*fpsArray.length)/sum);
+      }
+      function showFPS()
+      {
+        if (!fpsText)
+          return;
+        var curms = new Date().getTime();
+        if (lastms==0)
+        {
+          lastms = curms;
+          return;
+        }
+        var diff = curms - lastms;
+        if (diff>0)
+        {
+          fpsText.nodeValue="fps: "+getMeanFPS(diff).toString();
+        }
+        lastms = curms;
+      }
+
+      function initGL(canvas)
+      {
+        var names = [ "webgl",
+                      "experimental-webgl",
+                      "webkit-3d",
+                      "moz-webgl" ];  
+        for (var i=0; i<names.length; ++i)
+        {
+          try {
+            gl = canvas.getContext(names[i]);
+            if (gl)
+              break;
+          }
+          catch(e) {}
+        }
+        if (gl==null)
+          return;
+          //alert("Canno't initialize WebGL.");
+
+        gl.viewportWidth = canvas.width;
+        gl.viewportHeight = canvas.height;
+        gl.clearColor(0.0, 0.0, 0.0, 1.0);
+        addFPSComponent(canvas);
+      }
+      function startGL()
+      {
+        var combo = document.getElementById("combo");
+        if (combo)
+        {
+          for (var i=1; i<=maxIterations; ++i) {
+            var option = document.createElement("option");
+            option.text = "" + i;
+            option.value = i;
+            try {
+              combo.add(option, null); //Standard
+            }
+            catch(error) {
+              combo.add(option); // IE only
+            }
+          }
+          combo.value = iteration;
+        }
+
+        canvas = document.getElementById("myCanvas");
+        initGL(canvas);
+        if (gl==null)
+        {
+          alert("Canno't initialize WebGL.");
+          return;
+        }
+        initShaders();
+        mat4.identity(rotMatrix);
+        setBlend();
+        (function() {
+          var requestAnimationFrame = window.requestAnimationFrame || window.mozRequestAnimationFrame ||
+                                      window.webkitRequestAnimationFrame || window.msRequestAnimationFrame;
+          window.requestAnimationFrame = requestAnimationFrame;
+        })();
+        requestAnimationFrame(animLoop);
+        
+        //adding the event listerner for Mozilla
+        if(window.addEventListener)
+        {
+          // IE, Opera, Google Chrome, Safari
+          document.addEventListener('mousewheel', mouseScrolled, false);
+          // Firefox
+          document.addEventListener('DOMMouseScroll', mouseScrolled, false);
+        }
+        else // IE before 9.0
+          document.onmousewheel = mouseScrolled;
+      }
+
+      function animLoop(timestamp)
+      {
+        drawScene();
+        showFPS();
+        requestAnimationFrame(animLoop);
+      }
+
+      var isClicked = false;
+
+      function mouseMove(e)
+      {
+        if (!(isClicked && (e.button == 0))) 
+          return; 
+        mEndX = e.clientX-canvas.offsetLeft;
+        mEndY = e.clientY-canvas.offsetTop;
+        if (mEndX==mStartX && mEndY==mStartY)
+          return;
+        var xDelta = mEndX - mStartX;
+        var yDelta = mEndY - mStartY;
+        mStartX = mEndX;
+        mStartY = mEndY;
+        rotX = xDelta/128;
+        rotY = yDelta/128;
+      }
+      function mouseDown(e)
+      {
+        isClicked = true;
+        mStartX = e.clientX-canvas.offsetLeft; 
+        mStartY = e.clientY-canvas.offsetTop;
+        spin = false;
+      }
+      function mouseUp(e)
+      {
+        if (!isClicked)
+          return;
+        isClicked = false;
+        spin = true;
+      }
+      function mouseScrolled(e)
+      {
+        var el = document.elementFromPoint(e.clientX, e.clientY);
+        if (el.nodeName.toLowerCase()=="canvas")
+        {
+          var delta;
+          // normalize the delta
+          if (e.wheelDelta) {
+            // IE and Opera
+            delta = e.wheelDelta / 60;
+          }
+          else if (e.detail) {
+            // W3C
+            delta = -e.detail / 2;
+          }
+          zoom*= (1.0 + 0.1*delta);
+        }
+      }
+      function setIteration(value)
+      {
+        removeBuffers();
+        iteration = value;
+        drawScene();
+      }
+      function setBlend()
+      {
+        blend = document.getElementById("blendCheck").checked;
+      }
+    </script>
+  </head>  
+  
+  <body onload="startGL()">
+    <table>
+      <tr><th colspan="3">Hilbert space filling curve in 3D</th></tr>
+      <tr><td colspan="3">&nbsp;</td></tr>
+      <tr>
+        <td>
+          <div id="wrapper" style="position: relative;">
+            <canvas id="myCanvas" width="400" height="400" style="position: relative;"
+                    onmousedown="mouseDown(event)"
+                    onmouseup="mouseUp(event)"
+                    onmousemove="mouseMove(event)" > 
+                   <!-- Insert fallback content here -->  
+            </canvas>
+          </div>
+        </td>
+        <td>&nbsp;</td>
+        <td valign="top">
+          <table border="1">
+            <tr>
+              <td valign="top" align="center">
+                Iteration: <select name="combo" id="combo" onchange="setIteration(event.target.value)"></select>
+              </td>
+            </tr>
+            <tr>
+              <td align="center">
+                <form><input type="checkbox" id="blendCheck" onchange="setBlend()"/> Blend</form>
+              </td>
+            </tr>
+            <tr valign="bottom">
+              <td align="center">
+                <button type="button" name="animButton" id="animButton" onclick="verts2show=0">Animate</button>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+      <tr>
+        <td>
+           &nbsp;</br>Find related article <a href="http://goo.gl/Ry681">here</a>
+        </td>
+      </tr>
+    </table>
+  </body>  
+</html>
+
